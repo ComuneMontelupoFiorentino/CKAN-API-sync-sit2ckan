@@ -135,7 +135,7 @@ php sync.php -prod -UF \
 php sync.php -prod -SR
 ```
 **ResourceSearch**
-Risorsa
+
 ```ìni
 php sync.php -prod -RS --type=resource --resource_id=xxxxxxxxxxxxxxxxxxx
 ```
