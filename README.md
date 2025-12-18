@@ -1,6 +1,6 @@
 # INTEGRAZIONE PORTALE CKAN E DBMS POSTGRES
 
-La presente funzionalità è costituita da un insieme di script in linguaggio PHP in grado di gestire le operazioni di Upload di file, Ricerca di risorse, Query su risorse e gestione di Datastore (Upload record, Query, Upsert). Le operazioni svolte sono dettagliate in uno specifico file di log generato ad ogni processo.
+La presente funzionalità è costituita da un insieme di script in linguaggio PHP in grado di gestire le operazioni di creazione dataset da tabella PostgreSQL nei formati (CSV, JSON, GeoJSON, RDF), Upload dei file locali su risorse online, Ricerca di risorse, Query su risorse e gestione di Datastore (Upload record, Query, Upsert). Le operazioni svolte sono dettagliate in uno specifico file di log generato ad ogni processo.
 
 **Keywords**: OPENDATA, API, INTEROPERABILITA, CKAN, PostgreSQL, Riuso, PA
 
