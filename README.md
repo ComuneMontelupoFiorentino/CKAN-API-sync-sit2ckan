@@ -7,7 +7,7 @@ La presente funzionalità è costituita da un insieme di script in linguaggio PH
 ## Requisiti di funzionamento
 
 - Server con PHP versione `8` o superiore
-- PHP deve essere compilato con le seguenti estensioni: `php-cli`, `php-curl`, `php-pgsql`, `openssl`
+- PHP deve essere compilato con le seguenti estensioni: `php-cli`, `php-curl`, `php-pgsql`
 - database `Postgresql` versione 15 o superiore
 - versione API del servizio CKAN 2.4
 
