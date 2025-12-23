@@ -101,7 +101,7 @@ in caso nessuna o entrambe le opzioni vengano specificate, lo script terminerà 
 
 I comandi possono necessitare di filtri
 
-| **FUNZIONALITA**              | **COMANDO**      | **PARAMETRO**          | **PARAMETRO** |
+| **FUNZIONALITA**              | **COMANDO**      | **PARAMETRO**          | **TIPOLOGIA PARAMETRO** |
 |-------------------------------|------------------|------------------------|----------------------|
 | RecordUpdate                  | -RU              |                        |                      |
 | RecordsGET                    | -RG              | --[campo]=[valore]     | Obbligatorio         |
