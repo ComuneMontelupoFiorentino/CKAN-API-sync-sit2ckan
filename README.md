@@ -114,7 +114,7 @@ Esempi:
 
 **RecordUpdate** 
 ```ìni
-php sync.php -prod -SR
+php sync.php -prod -RU
 ```
 **RecordsGET**
 ```ìni
