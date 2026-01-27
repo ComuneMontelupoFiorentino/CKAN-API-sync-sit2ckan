@@ -11,6 +11,7 @@ class SyncRecordsTask
 {
     private array $ckanConfig;
     private RecordUpdateTask $recordUpdateTask;
+    private string $insertTable;
 
     public function __construct(
         private PostgresConnection $db,
@@ -21,6 +22,8 @@ class SyncRecordsTask
     
         $this->recordUpdateTask = new RecordUpdateTask($env, $logger);
         $this->ckanConfig = $this->recordUpdateTask->loadCkanConfig($env);
+
+        $this->insertTable = $this->ckanConfig['insert_table'] ?? 'llpp.module_online';
     }
 
     private function recordsGet(): array
@@ -89,7 +92,7 @@ class SyncRecordsTask
         foreach ($records as $rec) {
             try {
                 $stmt = $pdo->prepare(
-                    "INSERT INTO llpp.module_online
+                    "INSERT INTO {$this->insertTable}
                     (id_ckan, record_id, module_id, module_name, date_send_module, fields)
                     VALUES (:id_ckan, :record_id, :module_id, :module_name, :date_send_module, :fields)
                     RETURNING id"
@@ -108,7 +111,7 @@ class SyncRecordsTask
                 $this->logger->log('sync', "Record inserito in PostgreSQL ID={$idInserted}");
 
                 $stmt2 = $pdo->prepare(
-                    "SELECT * FROM llpp.module_online WHERE id = :id"
+                    "SELECT * FROM {$this->insertTable} WHERE id = :id"
                 );
                 $stmt2->execute([':id' => $idInserted]);
                 $pgRecord = $stmt2->fetch(PDO::FETCH_ASSOC);
