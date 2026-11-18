@@ -1,0 +1,67 @@
+; ============================================================
+; config/env/production.ini
+; Credenziali e parametri dell'ambiente di PRODUZIONE.
+; NON committare in VCS — aggiungere a .gitignore.
+; ============================================================
+
+[db]
+host     = 127.0.0.1
+port     = 5432
+dbname   = opendata
+user     =
+password =
+
+; ── Database alternativi (stesse credenziali di [db], cambia solo dbname) ────
+; Il nome della sezione è db_<database_origin> esattamente come appare
+; nel campo database_origin della vista all_schedulation.
+
+[db_ambiente]
+dbname = ambiente
+
+[db_amm_viab]
+dbname = amm_viab
+
+[db_basemap]
+dbname = basemap
+
+[db_eventi]
+dbname = eventi
+
+[db_llpp]
+dbname = llpp
+
+[db_management]
+dbname = management
+
+[db_patrimonio]
+dbname = patrimonio
+
+[db_population]
+dbname = population
+
+[db_segnalazioni_23]
+dbname = segnalazioni_23
+
+[db_sottoservizi]
+dbname = sottoservizi
+
+[db_tributi]
+dbname = tributi
+
+[db_urb]
+dbname = urb
+
+[db_vp]
+dbname = vp
+
+[db_ip_2020_2022]
+dbname = ip_2020_2022
+
+[ckan]
+base_url = https://dati.toscana.it
+api_key  =
+
+[filesystem]
+; In produzione si possono sovrascrivere i path di common.ini
+output_dir = /srv/data/media/opendata/output
+lock_file  = /usr/local/bin/prosit/CKAN-API-sync-sit2ckan/lock/scheduler.lock

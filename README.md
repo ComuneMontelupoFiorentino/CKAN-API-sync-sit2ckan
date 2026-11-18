@@ -1,153 +1,450 @@
-# INTEGRAZIONE PORTALE CKAN E DBMS POSTGRES
+# CKAN Scheduler
 
-La presente funzionalità è costituita da un insieme di script in linguaggio PHP in grado di gestire le operazioni di creazione dataset da tabella PostgreSQL nei formati (CSV, JSON, GeoJSON, RDF), Upload dei file locali su risorse online, Ricerca di risorse, Query su risorse e gestione di Datastore (Upload record, Query, Upsert). Le operazioni svolte sono dettagliate in uno specifico file di log generato ad ogni processo.
+Client CLI PHP per l'estrazione automatica di dati da PostgreSQL e il caricamento su portale CKAN tramite API.
 
-**Keywords**: OPENDATA, API, INTEROPERABILITA, CKAN, PostgreSQL, Riuso, PA
+---
 
-## Requisiti di funzionamento
+## Struttura del progetto
 
-- Server con PHP versione `8` o superiore
-- PHP deve essere compilato con le seguenti estensioni: `php-cli`, `php-curl`, `php-pgsql`
-- database `Postgresql` versione 15 o superiore
-- versione API del servizio CKAN 2.4
+```
+ckan-scheduler/
+├── bin/
+│   ├── scheduler.php              ← Esecuzione reale (estrae + carica su CKAN)
+│   └── dry-run.php                ← Simulazione (estrae ma NON carica su CKAN)
+├── config/
+│   ├── common.ini                 ← Parametri comuni (retry, tabelle, scheduling)
+│   └── env/
+│       ├── production.ini.example ← Modello: copiare in production.ini (credenziali produzione)
+│       └── test.ini.example       ← Modello: copiare in test.ini (credenziali test)
+├── src/
+│   ├── autoload.php               ← Autoloader PSR-4 (no Composer)
+│   ├── Application.php            ← Orchestratore principale
+│   ├── Config/
+│   │   ├── Config.php             ← Value object configurazione
+│   │   └── IniConfigLoader.php    ← Carica e fonde i file .ini
+│   ├── Database/
+│   │   ├── Connection.php         ← Wrapper PDO
+│   │   └── ConnectionPool.php     ← Pool multi-database (un DB per schema)
+│   ├── Enum/
+│   │   └── FileExtension.php      ← Enum: csv | json | rdf | geojson | xlsx
+│   ├── Exception/
+│   │   ├── CkanApiException.php
+│   │   ├── ExtractionException.php
+│   │   ├── FilesystemException.php
+│   │   └── LockException.php
+│   ├── Http/
+│   │   └── RetryHttpClient.php    ← cURL con retry esponenziale
+│   ├── Lock/
+│   │   └── FileLock.php           ← Lock filesystem anti-sovrapposto
+│   ├── Logging/
+│   │   └── ErrorLogger.php        ← Scrittura errori su PostgreSQL
+│   ├── Model/
+│   │   └── SchedulationRecord.php ← Value object da all_schedulation
+│   ├── Repository/
+│   │   └── ResourceLogRepository.php ← Upsert resource_upload_log
+│   ├── Service/
+│   │   ├── UploaderInterface.php  ← Contratto upload
+│   │   ├── CkanUploader.php       ← Upload reale via API CKAN
+│   │   ├── DryRunUploader.php     ← Simulazione con report a terminale
+│   │   └── DataExtractor.php      ← Esegue query e scrive file su disco
+│   └── Writer/
+│       ├── XlsxWriter.php         ← Generatore XLSX senza dipendenze
+│       └── ZipBuilder.php         ← ZIP in PHP puro (usato da XlsxWriter)
+├── sql/
+│   └── schema.sql                 ← DDL tabelle di log (eseguire una volta)
+└── .gitignore
+```
+
+---
+
+## Comandi disponibili
+
+### Esecuzione reale — estrae i dati e carica su CKAN
+
+```bash
+# Produzione (default se --env omesso)
+php bin/scheduler.php --env=production
+
+# Test
+php bin/scheduler.php --env=test
+
+# Con log su file (consigliato per cron)
+php bin/scheduler.php --env=production 2>&1 | tee /tmp/scheduler_$(date +%Y%m%d_%H%M%S).txt
+```
+
+### Dry-run — simula senza toccare CKAN né il DB di log
+
+```bash
+# Default: usa env "test"
+php bin/dry-run.php
+
+# Esplicito su test
+php bin/dry-run.php --env=test
+
+# Dry-run sui dati di produzione (solo lettura DB, nessuna scrittura CKAN)
+php bin/dry-run.php --env=production
+```
+
+Il dry-run stampa per ogni risorsa un box con:
+- `resource_id` CKAN di destinazione
+- `database_origin` (schema PostgreSQL sorgente)
+- path locale del file generato
+- dimensione e checksum MD5
+- endpoint che verrebbe chiamato
+
+### Selezione ambiente
+
+| Metodo | Esempio | Priorità |
+|--------|---------|----------|
+| Flag CLI | `--env=production` | Massima |
+| Variabile d'ambiente | `APP_ENV=production php bin/scheduler.php` | Media |
+| Default scheduler | `production` | Bassa |
+| Default dry-run | `test` | Bassa |
+
+### Exit codes
+
+| Codice | Significato |
+|--------|-------------|
+| `0` | Successo completo |
+| `1` | Uno o più errori parziali (dettagli in `scheduler_error_log`) |
+| `2` | File `.ini` mancante o chiave obbligatoria assente |
+| `3` | Lock non acquisibile (altra istanza in esecuzione) |
+
+---
+
+## Configurazione
+
+### `config/common.ini` — parametri condivisi (committare in VCS)
+
+```ini
+[retry]
+max_attempts   = 3        ; tentativi totali per ogni chiamata CKAN
+base_delay_ms  = 500      ; attesa primo retry in millisecondi
+multiplier     = 2.0      ; moltiplicatore backoff esponenziale
+max_delay_ms   = 10000    ; attesa massima tra retry
+
+[filesystem]
+output_dir = BASE_DIR/output       ; BASE_DIR = path assoluto del progetto
+lock_file  = BASE_DIR/run/scheduler.lock
+
+[tables]
+resource_log = opendata.resource_upload_log
+error_log    = opendata.scheduler_error_log
+
+[scheduling]
+materialized_view = opendata.all_schedulation
+query             = SELECT * FROM opendata.all_schedulation
+```
+
+### `config/env/production.ini` — credenziali produzione (NON committare)
+
+```ini
+[db]
+host     = 127.0.0.1
+port     = 5432
+dbname   = opendata
+user     = tuo_utente
+password = tua_password
+
+[ckan]
+base_url = https://dati.toscana.it
+api_key  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...   ; JWT token generato dal profilo CKAN
+
+[filesystem]
+output_dir = /percorso/assoluto/output
+lock_file  = /percorso/assoluto/run/scheduler.lock
+
+; ── Database alternativi per schema di origine ──────────────────────────────
+; Stesse credenziali del [db] principale, cambia solo dbname.
+; Il nome della sezione è db_<database_origin> come appare in all_schedulation.
+
+[db_ambiente]
+dbname = ambiente
+
+[db_amm_viab]
+dbname = amm_viab
+
+[db_vp]
+dbname = vp
+
+; Aggiungi una sezione per ogni schema che usa un DB separato.
+; Gli schemi non elencati usano automaticamente la connessione [db] principale.
+```
+
+### `config/env/test.ini` — credenziali test (NON committare)
+
+```ini
+[db]
+host     = localhost
+port     = 5432
+dbname   = opendata_test
+user     = tuo_utente
+password = tua_password
+
+[ckan]
+base_url = https://staging.dati.toscana.it
+api_key  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...
+
+[retry]
+; Retry più veloci in test
+max_attempts   = 2
+base_delay_ms  = 100
+```
+
+---
+
+## Vista materializzata `opendata.all_schedulation`
+
+Il processo legge da questa vista i record da elaborare. I campi utilizzati sono:
+
+| Campo | Tipo | Descrizione |
+|-------|------|-------------|
+| `id` | INTEGER | PK della tabella `schedule_upload_jobs` di origine |
+| `resource_id` | TEXT | UUID della risorsa su CKAN |
+| `resource_name` | TEXT | Nome file senza estensione |
+| `json_params` | JSONB | Query sorgente: `{"query": "SELECT * FROM schema.tabella"}` |
+| `file_extension` | TEXT | `csv` · `json` · `rdf` · `geojson` · `xlsx` |
+| `database_origin` | TEXT | Schema PostgreSQL di provenienza (`amm_viab`, `ambiente`, `vp`, …) |
+| `schedulation` | INTEGER | Codice frequenza (vedi tabella sotto) |
+| `is_schedulation_day` | BOOLEAN | `TRUE` se oggi è un giorno di elaborazione |
+
+### Codici di frequenza (`schedulation`)
+
+| Codice | Frequenza |
+|--------|-----------|
+| `1` | Giornaliera |
+| `2` | Settimanale (lunedì) |
+| `3` | Mensile (1° del mese) |
+| `4` | Trimestrale (1° di gennaio, aprile, luglio, ottobre) |
+| `5` | Semestrale (1° di gennaio e luglio) |
+| `6` | Annuale (1° gennaio) |
+
+Solo i record con `is_schedulation_day = TRUE` vengono elaborati ad ogni esecuzione.
+
+---
+
+## Formati di output supportati
+
+### CSV (`file_extension = csv`)
+
+```json
+{ "query": "SELECT id, nome, valore FROM schema.tabella" }
+```
+
+Produce un file CSV con intestazione. Tutti i campi della query diventano colonne.
+
+---
+
+### JSON (`file_extension = json`)
+
+```json
+{ "query": "SELECT * FROM schema.tabella" }
+```
+
+Produce un array JSON di oggetti, uno per riga.
+
+---
+
+### GeoJSON (`file_extension = geojson`)
+
+Il renderer supporta **due modalità**:
+
+**Modalità A — coordinate come colonne `lat` / `lon`** (più comune con PostGIS):
+
+```json
+{
+  "query": "SELECT id, ST_Y(ST_Transform(geom, 4326)) AS lat, ST_X(ST_Transform(geom, 4326)) AS lon, nome FROM schema.tabella"
+}
+```
+
+Produce:
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [11.028, 43.731] },
+      "properties": { "id": "A01", "lat": 43.731, "lon": 11.028, "nome": "..." }
+    }
+  ]
+}
+```
+
+> ⚠️ GeoJSON vuole le coordinate in ordine **[longitude, latitude]** — il renderer lo gestisce automaticamente.
+
+**Modalità B — colonna `geometry` o `geom` con stringa GeoJSON**:
+
+```json
+{
+  "query": "SELECT id, ST_AsGeoJSON(geom) AS geometry, nome FROM schema.tabella"
+}
+```
+
+**Modalità C — nessuna geometria**: `"geometry": null` (Feature valida senza posizione).
+
+---
+
+### RDF (`file_extension = rdf`)
+
+```json
+{ "query": "SELECT id, titolo, descrizione FROM schema.tabella" }
+```
+
+Produce RDF/XML con triple Dublin Core, una per riga.
+
+---
+
+### XLSX (`file_extension = xlsx`)
+
+```json
+{ "query": "SELECT id, nome, valore FROM schema.tabella" }
+```
+
+Produce un file Excel (.xlsx) con un solo foglio, generato senza librerie esterne
+(`src/Writer/XlsxWriter.php` + `src/Writer/ZipBuilder.php`, non serve né Composer né `ext-zip`).
+
+- Il foglio prende il nome della risorsa (max 31 caratteri).
+- Intestazione in grassetto, bloccata e con filtro automatico; larghezza colonne automatica.
+- Numeri → celle numeriche; booleani → VERO/FALSO; `NULL` → cella vuota; resto → testo.
+- Stringhe con zeri iniziali (CAP, codici ISTAT, …) e numeri con più di 15 cifre restano **testo**.
+- Date e timestamp restano testo nel formato restituito da PostgreSQL (es. `2026-10-14 08:00:00`).
+- Limiti Excel: 1.048.575 righe di dati e 16.384 colonne (oltre → errore `extraction`);
+  le celle oltre 32.767 caratteri vengono troncate.
+- Upload su CKAN con `format = XLSX` e mime type
+  `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
+
+---
+
+## File di output su disco
+
+I file sono organizzati per schema di origine:
+
+```
+output/
+├── amm_viab/
+│   └── civici.csv
+├── ambiente/
+│   ├── Valori_massimi_e_minimi_giornalieri.csv
+│   └── Picchi_minimi_giornalieri_umidita.csv
+└── vp/
+    ├── Localizzazione_piante.geojson
+    └── Alberi_pubblici.csv
+```
+
+I file vengono **sempre sovrascritti** ad ogni esecuzione — nessuno storage storico.
+
+---
+
+## Tabelle PostgreSQL di log
+
+Eseguire `sql/schema.sql` una sola volta prima del primo avvio.
+
+### `opendata.resource_upload_log`
+
+Tiene traccia dell'ultimo upload riuscito per ogni risorsa. Una riga per `resource_id`, aggiornata (upsert) ad ogni upload completato con successo.
+
+| Campo | Descrizione |
+|-------|-------------|
+| `resource_id` | UUID risorsa CKAN |
+| `resource_name` | Nome della risorsa |
+| `database_origin` | Schema PostgreSQL di origine |
+| `path_file` | Path locale del file al momento dell'upload |
+| `data_upload` | Timestamp dell'ultimo upload riuscito |
+| `file_extension` | Formato: csv, json, rdf, geojson, xlsx |
+
+### `opendata.scheduler_error_log`
+
+Ogni errore catturato viene persistito qui con tutti i dettagli.
+
+| Campo | Descrizione |
+|-------|-------------|
+| `occurred_at` | Timestamp dell'errore |
+| `error_type` | `extraction` · `upload` · `filesystem` · `validation` |
+| `resource_id` | UUID risorsa coinvolta (se disponibile) |
+| `resource_name` | Nome risorsa |
+| `message` | Messaggio di errore |
+| `server_response` | Risposta raw dal server CKAN (per errori upload) |
+| `http_status` | Codice HTTP CKAN (per errori upload) |
+| `stack_trace` | Stack trace PHP completo |
+
+### View di monitoraggio
+
+```sql
+-- Errori degli ultimi 7 giorni
+SELECT * FROM opendata.recent_scheduler_errors;
+
+-- Stato corrente di tutte le risorse con conteggio errori ultimi 30 giorni
+SELECT * FROM opendata.resource_upload_status;
+```
+
+---
+
+## Flusso di esecuzione
+
+```
+1. Acquisisce il file lock (impedisce esecuzioni parallele)
+2. REFRESH MATERIALIZED VIEW opendata.all_schedulation
+3. Legge i record con is_schedulation_day = TRUE
+4. Per ogni record:
+   a. Apre la connessione al DB corretto (database_origin)
+   b. Esegue la query in json_params
+   c. Scrive il file in output/<database_origin>/<resource_name>.<ext>
+5. Per ogni file estratto con successo:
+   a. POST /api/3/action/resource_update su CKAN (con retry)
+   b. Upsert su opendata.resource_upload_log
+6. Tutti gli errori → opendata.scheduler_error_log
+7. Rilascia il lock
+```
+
+---
 
 ## Installazione
 
-Lo script non necessita di alcuna installazione specifica, è sufficiente copiare il contenuto completo della cartella principale in una cartella di destinazione sul server sul quale si vorranno lanciare le funzionalità.
+```bash
+# 1. Crea i file .ini con le credenziali partendo dai modelli (non vanno mai nel repository)
+cp config/env/production.ini.example config/env/production.ini
+cp config/env/test.ini.example config/env/test.ini
+chmod 600 config/env/*.ini
+nano config/env/production.ini
+nano config/env/test.ini
 
-## Funzionamento generale dello script
+# 2. Crea le tabelle di log (una sola volta)
+psql -d opendata -f sql/schema.sql
 
-Per ogni funzionalità, è possibile lanciare lo script in due modalità distinte, una modalità di `test` ed una modalità di `produzione`.
+# 3. Rendi eseguibili i binari
+chmod +x bin/scheduler.php bin/dry-run.php
 
-**Elenco delle funzionalità**
+# 4. Testa con dry-run prima del primo upload reale
+php bin/dry-run.php --env=production
 
-- `RecordUpdate`: Consente di aggiornare un record in un datastore
-- `RecordsGET`: Consente di elencare i record della risorsa con o senza filtri
-- `ExportData`: Consente di generare file da tabelle PostgreSQL nei formati CSV, JSON, GeoJSON, RDF
-- `Uploadfile`: Consente l'Upload di file locali su risorsa online aggiornando quella presente
-- `SyncRecords`: Consente di ottenere i records da un datastore e l'inserimento dei record in una tabella del DB PostgreSQL
-- `ResourceSearch`: Consente di ottenere i metadati di una risorsa in un file jSON
+# 5. Prima esecuzione reale
+php bin/scheduler.php --env=production
+```
 
-### Struttura delle cartelle
+## Aggiunta al cron
 
 ```bash
-|── cartella principale
-    |── Classes/
-        |── Services/
-            |── Config/
-                |── CkanConfigLoader.php
-            |── Database/
-                |── PostgresConnection.php
-            |── Logger/
-                |── MonthlyLogger.php
-            |── Opendata/
-                |── Export
-                    |── ExportDataWriter.php
-                |── SchedulationLoader.php
-        |── Tasks/
-            |── ExportDataWriter.php
-                |── RecordsGetTask.php
-                |── RecordUpdateTask.php
-                |── ResourceSearchTask.php
-                |── SyncRecordsTask.php
-                |── UploadFileTask.php
-    |── config/
-        |── ckan_client_config.ini
-        |── pg_service.conf
-    |── Logs/
-    |── bootstrap.php
-    |── sync.php
-```
-## Configurazione
-
-Configurare il file `config/pg_service.conf` con i parametri di connessione al db.
-Il file può contenere due configurazioni `pg_test` e `pg_prod`. 
-Questa distinzione è stata introdotta per garantire una maggiore flessibilità e test. Nulla vieta di impostare la stessa configurazione sia per test che per produzione.
-
-Per i dettagli sulla struttura e sulla configurazione del file pg_service.conf consultare il [manuale](https://www.postgresql.org/docs/current/libpq-pgservice.html) Postgres dedicato.
-
-Configurare il file `config/ckan_client_config.ini` con i parametri del servizio ckan.
-Anche in questo caso è presente la distinzione tra ambiente di test e produzione per il servizio ckan.
-
-```ìni
-[ckan_test]
-url=https://[PORTALE_CKAN].it
-key=[TOKEN-O-API-KEY] 
-resource_module=[ID-RISORSA-DATASTORE] 
-; path locale dove ExportDataWriter salva i file
-resource_local_path=/PERCORSO/AI/FILE/LOCALI/
+crontab -e
 ```
 
-## Utilizzo della funzionalità
-
-Una volta completati gli step di configurazione precedenti, è possibile lanciare la funzionalità direttamente da riga di comando posizionandosi nella cartella principale (stesso livello del file `sync.php`)
-
-```cli
-$ php sync.php [ambiente] [comando] [filtro]
+```
+# Ogni giorno alle 02:00
+0 2 * * * /usr/bin/php /percorso/bin/scheduler.php --env=production >> /var/log/ckan-scheduler.log 2>&1
 ```
 
-Per qualsiasi funzionalità è necessario definire ambiente di esecuzione e comando
+---
 
-### Ambiente
+## Note su CKAN
 
-La definizione dell'ambiente di esecuzione è obbligatorio, quindi definire uno tra:
+- Usare sempre un **API token JWT** (generato da `https://dati.toscana.it/user/<username>/api-tokens`), non la vecchia API key UUID — le vecchie chiavi sono deprecate su CKAN 2.9+.
+- Il server `dati.toscana.it` richiede **HTTP/1.1** — il client lo forza automaticamente (`CURLOPT_HTTP_VERSION_1_1`). Con HTTP/2 il server chiude la connessione senza rispondere.
+- Gli errori HTTP 4xx (es. 403, 404) **non vengono ritentati** — sono errori client permanenti. Gli errori 5xx vengono ritentati secondo la configurazione `[retry]`.
 
-- `--test`, lancio in ambiente di test
-- `--prod`, lancio in ambiente di produzione
+## Parte di Prosit
 
-in caso nessuna o entrambe le opzioni vengano specificate, lo script terminerà con errore.
-
-### Comando
-
-I comandi possono necessitare di filtri
-
-| **FUNZIONALITA**              | **COMANDO**      | **PARAMETRO**          | **TIPOLOGIA PARAMETRO** |
-|-------------------------------|------------------|------------------------|----------------------|
-| RecordUpdate                  | -RU              |                        |                      |
-| RecordsGET                    | -RG              | --[campo]=[valore]     | Obbligatorio         |
-| ExportData                    | -EXD             | --schedulation_id=[id] | Facoltativo          |
-| Uploadfile                    | -UF              | --resource_id=[id]  --file_path=[/percorso/locale/al/file.csv] | Obbligatorio |
-| SyncRecords                   | -SR              |                        |                      |
-| ResourceSearch                | -RS              | -type=[datastore/resource] --limit=[numeroRecords] --filters='{"campo":"valore"}' --resource_id=[id] | Type obbligatorio, se `Datastore` allora --limit è obbligatorio e --filters facoltativo. Se resource allora --resource_id è obbligatorio. |
-
-Esempi:
-
-**RecordUpdate** 
-```ìni
-php sync.php -prod -RU
-```
-**RecordsGET**
-```ìni
-php sync.php -test -RG --id=99
-```
-**ExportData**
-```ìni
-php sync.php -prod -EXD --schedulation_id=2
-```
-**Uploadfile**
-```ìni
-php sync.php -prod -UF \
-    			--resource_id=xxxxxxxxxxxxxxxx \
-    			--file_path=/percorso/al/file/locale/file_locale.json
-```
-**SyncRecords**
-```ìni
-php sync.php -prod -SR
-```
-**ResourceSearch**
-
-```ìni
-php sync.php -prod -RS --type=resource --resource_id=xxxxxxxxxxxxxxxxxxx
-```
-Datastore
-```ìni
-php sync.php -test -RS --type=datastore --limit=100
-```
-Datastore con filtro
-```ìni
-php sync.php -test -RS --type=datastore --limit=10 --filters='{"iot": "stazione-meteo-comunale"}'
-```
-
-### Logs
-
-Lo script ad ogni esecuzione aggiornerà un di file log nel percorso `/Logs/[anno]/[mese]/` denominato `{comando}.log`.
+Questo componente fa parte di **[Prosit](https://github.com/ComuneMontelupoFiorentino/prosit)**,
+il Sistema Informativo Territoriale del Comune di Montelupo Fiorentino. Nel repository
+[prosit](https://github.com/ComuneMontelupoFiorentino/prosit) ci sono l'architettura, l'elenco
+di tutti i componenti (topic [`prosit`](https://github.com/search?q=org%3AComuneMontelupoFiorentino+topic%3Aprosit&type=repositories))
+e le versioni che funzionano insieme.

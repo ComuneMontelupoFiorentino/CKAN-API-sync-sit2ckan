@@ -1,0 +1,28 @@
+; ============================================================
+; config/env/test.ini
+; Credenziali e parametri dell'ambiente di TEST / sviluppo.
+; NON committare in VCS — aggiungere a .gitignore.
+; ============================================================
+
+[db]
+host     = localhost
+port     = 5432
+dbname   = opendata
+user     =
+password =
+
+[ckan]
+base_url = https://dati.toscana.it/
+api_key  =
+
+[filesystem]
+; In test i file vengono scritti in una cartella separata
+output_dir = BASE_DIR/output_test
+lock_file  = BASE_DIR/run/scheduler_test.lock
+
+[retry]
+; In test si riduce l'attesa per rendere il feedback più rapido
+max_attempts   = 2
+base_delay_ms  = 100
+multiplier     = 2.0
+max_delay_ms   = 1000

@@ -1,0 +1,7 @@
+config/env/*.ini
+logs/
+lock/
+run/
+output/
+output_test/
+*.bak*
